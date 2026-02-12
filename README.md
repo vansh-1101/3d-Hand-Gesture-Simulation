@@ -3,7 +3,7 @@
 ✋ An interactive 3D particle visualization system controlled by real-time hand gestures using AI-powered hand tracking.
 
 ### 🔗 Live Demo
-🚀 [Try it here](REPLACE_WITH_YOUR_LIVE_URL)
+🚀 [Try it here](https://vansh-1101.github.io/3d-Hand-Gesture-Simulation/)
 
 ## 🎯 Features
 
