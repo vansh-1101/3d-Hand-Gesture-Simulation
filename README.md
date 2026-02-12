@@ -2,6 +2,9 @@
 
 ✋ An interactive 3D particle visualization system controlled by real-time hand gestures using AI-powered hand tracking.
 
+### 🔗 Live Demo
+🚀 [Try it here](REPLACE_WITH_YOUR_LIVE_URL)
+
 ## 🎯 Features
 
 - **Real-time Hand Tracking**: Uses MediaPipe and TensorFlow to detect hand position and gestures from webcam
