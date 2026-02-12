@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hand Particles (Math Fix)</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: monospace; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        
+        #ui {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            color: #0f0; background: rgba(0, 20, 0, 0.9);
+            padding: 20px; border: 1px solid #0f0; border-radius: 8px;
+            pointer-events: none;
+            width: 250px;
+        }
+        .controls { margin-top: 15px; pointer-events: auto; display: flex; flex-wrap: wrap; gap: 5px; }
+        button {
+            background: rgba(0, 255, 0, 0.1); border: 1px solid #0f0; color: #0f0;
+            padding: 8px 12px; cursor: pointer; flex: 1 1 40%;
+            font-family: inherit; font-weight: bold;
+        }
+        button:hover { background: #0f0; color: #000; }
+        
+        #loader {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            z-index: 100; text-align: center; color: white;
+            background: #111; padding: 40px; border: 1px solid #333;
+            min-width: 300px;
+        }
+        #bar { width: 100%; height: 4px; background: #333; margin-top: 15px; }
+        #progress { width: 0%; height: 100%; background: #0f0; transition: width 0.3s; }
+        #debug-log { color: #555; font-size: 0.8em; margin-top: 10px; }
+    </style>
+
+    <script async src="https://unpkg.com/es-module-shims@1.6.3/dist/es-module-shims.js"></script>
+    <script type="importmap">
+      { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.10.0/dist/tf-core.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.10.0/dist/tf-backend-webgl.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/hand-pose-detection@2.0.1/dist/hand-pose-detection.min.js"></script>
+</head>
+<body>
+
+<div id="loader">
+    <h2 id="status">INITIALIZING SYSTEM...</h2>
+    <div id="bar"><div id="progress"></div></div>
+    <div id="debug-log">Loading Core Libraries...</div>
+</div>
+
+<div id="ui">
+    <h3>GESTURE CORE</h3>
+    <div>✋ Move: Rotate</div>
+    <div>🤏 Pinch: Explode</div>
+    <div id="tracker-status" style="color:yellow; margin-top:10px; border-top:1px solid #333; padding-top:5px;">
+        Loading AI...
+    </div>
+    
+    <div class="controls">
+        <button onclick="setShape('sphere')">Sphere</button>
+        <button onclick="setShape('cube')">Cube</button>
+        <button onclick="setShape('ring')">Saturn</button>
+        <button onclick="setShape('galaxy')">Galaxy</button>
+    </div>
+</div>
+
+<video id="video" playsinline muted autoplay style="display:none"></video>
+<div id="canvas-container"></div>
+
+<script type="module">
+    import * as THREE from 'three';
+
+    // --- CONFIG ---
+    const COUNT = 15000;
+    const SIZE = 0.15;
+    
+    // --- STATE ---
+    let scene, camera, renderer, particles;
+    let handDetector;
+    let handData = { detected: false, x: 0, y: 0, pinch: 1.0 };
+    
+    // --- MEMORY BUFFERS ---
+    // 1. basePositions: Where the particle actually is (Morphing logic)
+    // 2. targetPositions: Where the particle wants to go (Shape logic)
+    // 3. renderPositions: Where the particle draws (Expansion logic)
+    const basePositions = new Float32Array(COUNT * 3);
+    const targetPositions = new Float32Array(COUNT * 3);
+    const renderPositions = new Float32Array(COUNT * 3);
+    const colors = new Float32Array(COUNT * 3);
+
+    // --- PROGRESS UI ---
+    const ui = {
+        bar: document.getElementById('progress'),
+        log: document.getElementById('debug-log'),
+        screen: document.getElementById('loader'),
+        tracker: document.getElementById('tracker-status')
+    };
+    function updateLoad(pct, msg) {
+        ui.bar.style.width = pct + '%';
+        ui.log.innerText = msg;
+    }
+
+    // --- 1. THREE.JS ENGINE ---
+    function initEngine() {
+        try {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x000000, 0.02);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 20;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Init Data
+            for (let i = 0; i < COUNT * 3; i++) {
+                basePositions[i] = (Math.random() - 0.5) * 50;
+                targetPositions[i] = basePositions[i];
+                colors[i] = 1.0;
+            }
+
+            const geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(renderPositions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+            const material = new THREE.PointsMaterial({
+                size: SIZE, vertexColors: true, blending: THREE.AdditiveBlending,
+                depthWrite: false, transparent: true, opacity: 0.9
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            setShape('sphere'); // Default
+            
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth/window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+        } catch (e) {
+            alert("WebGL Error: " + e.message);
+        }
+    }
+
+    // --- 2. SHAPE GENERATORS ---
+    window.setShape = (type) => {
+        for (let i = 0; i < COUNT; i++) {
+            let x, y, z;
+            const idx = i * 3;
+
+            if (type === 'sphere') {
+                const r = 8;
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                x = r * Math.sin(phi) * Math.cos(theta);
+                y = r * Math.sin(phi) * Math.sin(theta);
+                z = r * Math.cos(phi);
+            } 
+            else if (type === 'cube') {
+                const s = 12;
+                x = (Math.random() - 0.5) * s;
+                y = (Math.random() - 0.5) * s;
+                z = (Math.random() - 0.5) * s;
+            }
+            else if (type === 'ring') {
+                const angle = Math.random() * Math.PI * 2;
+                if(i < COUNT * 0.2) {
+                    const r = 3;
+                    const theta = Math.random() * Math.PI * 2;
+                    const phi = Math.acos(2 * Math.random() - 1);
+                    x = r * Math.sin(phi) * Math.cos(theta);
+                    y = r * Math.sin(phi) * Math.sin(theta);
+                    z = r * Math.cos(phi);
+                } else {
+                    const r = 6 + Math.random() * 8;
+                    x = Math.cos(angle) * r;
+                    y = (Math.random() - 0.5) * 0.5;
+                    z = Math.sin(angle) * r;
+                }
+            }
+            else if (type === 'galaxy') {
+                const angle = i * 0.05;
+                const r = i * 0.002 * 12;
+                x = r * Math.cos(angle);
+                y = (Math.random() - 0.5) * (r * 0.2);
+                z = r * Math.sin(angle);
+            }
+
+            targetPositions[idx] = x;
+            targetPositions[idx+1] = y;
+            targetPositions[idx+2] = z;
+        }
+    };
+
+    // --- 3. AI HAND TRACKING ---
+    async function initAI() {
+        if(!window.handPoseDetection) throw new Error("AI Script Failed to Load");
+        
+        const video = document.getElementById('video');
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { width: 640, height: 480 }, audio: false 
+        });
+        video.srcObject = stream;
+        await new Promise(resolve => { video.onloadedmetadata = () => { video.play(); resolve(); }});
+
+        const model = window.handPoseDetection.SupportedModels.MediaPipeHands;
+        const config = {
+            runtime: 'mediapipe',
+            solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240',
+            modelType: 'lite',
+            maxHands: 1
+        };
+        handDetector = await window.handPoseDetection.createDetector(model, config);
+    }
+
+    async function detect() {
+        if (!handDetector) return;
+        const video = document.getElementById('video');
+        if (video.readyState < 2) return;
+
+        try {
+            const hands = await handDetector.estimateHands(video);
+            
+            if (hands.length > 0) {
+                handData.detected = true;
+                const kp = hands[0].keypoints;
+                
+                // Position (-1 to 1)
+                handData.x = (kp[0].x - 320) / 320; 
+                handData.y = -(kp[0].y - 240) / 240; 
+                
+                // Pinch Distance
+                const p1 = kp[4]; // Thumb
+                const p2 = kp[8]; // Index
+                const dist = Math.sqrt((p1.x-p2.x)**2 + (p1.y-p2.y)**2);
+                
+                // Map pinch: 20px -> 0.1 (small), 150px -> 3.0 (large)
+                handData.pinch = Math.max(0.1, Math.min(dist / 30, 4.0));
+                
+                ui.tracker.innerHTML = `ACTIVE | Pinch: <span style="color:white">${dist.toFixed(0)}</span>`;
+                ui.tracker.style.color = "#0f0";
+            } else {
+                handData.detected = false;
+                handData.pinch = 1.0;
+                ui.tracker.innerText = "Scanning for hand...";
+                ui.tracker.style.color = "yellow";
+            }
+        } catch (e) {
+            console.warn(e);
+        }
+    }
+
+    // --- 4. ANIMATION LOOP ---
+    function animate() {
+        requestAnimationFrame(animate);
+        detect();
+
+        const time = Date.now() * 0.001;
+        
+        // Use detected pinch OR smooth return to 1.0
+        const expansion = handData.detected ? handData.pinch : 1.0;
+        const rotX = handData.detected ? handData.y : 0;
+        const rotY = handData.detected ? handData.x : 0;
+        const hue = 0.6 + (handData.x * 0.2);
+        
+        const posAttr = particles.geometry.attributes.position;
+        const colAttr = particles.geometry.attributes.color;
+        const colorObj = new THREE.Color();
+
+        for (let i = 0; i < COUNT; i++) {
+            const idx = i * 3;
+
+            // A. MORPH PHYSICS: Move "Base" towards "Target"
+            // We do NOT multiply by expansion here. This keeps the shape stable.
+            basePositions[idx]   += (targetPositions[idx]   - basePositions[idx])   * 0.05;
+            basePositions[idx+1] += (targetPositions[idx+1] - basePositions[idx+1]) * 0.05;
+            basePositions[idx+2] += (targetPositions[idx+2] - basePositions[idx+2]) * 0.05;
+
+            // B. RENDER VISUALS: Apply Expansion & Noise to "Base"
+            // We write the result to "posAttr" (the screen), but never save it back to "basePositions"
+            const noise = Math.sin(time * 2 + i) * 0.05;
+            
+            const renderX = basePositions[idx]   * expansion + noise;
+            const renderY = basePositions[idx+1] * expansion + noise;
+            const renderZ = basePositions[idx+2] * expansion + noise;
+
+            // Safety check against NaN (Black Screen Prevention)
+            if (isNaN(renderX)) {
+                basePositions[idx] = 0; // Reset corrupted particle
+                posAttr.array[idx] = 0;
+            } else {
+                posAttr.array[idx]   = renderX;
+                posAttr.array[idx+1] = renderY;
+                posAttr.array[idx+2] = renderZ;
+            }
+
+            // Color
+            const dist = Math.sqrt(renderX**2 + renderY**2 + renderZ**2);
+            colorObj.setHSL(hue, 0.8, 0.6 - (dist * 0.015));
+            colAttr.array[idx]   = colorObj.r;
+            colAttr.array[idx+1] = colorObj.g;
+            colAttr.array[idx+2] = colorObj.b;
+        }
+
+        // Global Rotation
+        particles.rotation.y += 0.002 + (rotY * 0.05);
+        particles.rotation.x += (rotX * 0.05 - particles.rotation.x) * 0.1;
+
+        posAttr.needsUpdate = true;
+        colAttr.needsUpdate = true;
+        renderer.render(scene, camera);
+    }
+
+    // --- MAIN ---
+    async function start() {
+        updateLoad(20, "Initializing Graphics...");
+        initEngine();
+        
+        updateLoad(50, "Requesting Camera...");
+        await initAI();
+        
+        updateLoad(100, "SYSTEM READY");
+        setTimeout(() => ui.screen.style.display = 'none', 500);
+        animate();
+    }
+
+    start().catch(e => {
+        ui.log.style.color = 'red';
+        ui.log.innerHTML = `FATAL ERROR:<br>${e.message}`;
+    });
+
+</script>
+</body>
+</html>
